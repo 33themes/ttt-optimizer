@@ -3,20 +3,22 @@
 Plugin Name: TTT Optimizer
 Plugin URI: http://www.33themes.com
 Description: JS and CSS compressor. Simple and fast.
-Version: 0.3
+Version: 0.5.1
 Author: 33 Themes UG i.Gr.
 Author URI: http://www.33themes.com
 */
 
-// define('TTT_OPTIMIZER_DEBUG',true);
+//define('TTT_OPTIMIZER_DEBUG',true);
 define('TTTINC_OPTIMIZER', dirname(__FILE__) );
-define('TTTVERSION_OPTIMIZER', 0.2 );
 
 function ttt_autoload_optimizer( $class ) {
     
     if ( 0 !== strpos($class, 'TTTLoadmore')
         && 0 !== strpos($class, 'CSSmin')
         && 0 !== strpos($class, 'JSMin') ) return;
+
+    if (class_exists('CSSmin')) return;
+    if (class_exists('JSMin')) return;
     
     $file = TTTINC_OPTIMIZER . '/class/' . $class . '.php';
     if (is_file($file)) {
@@ -41,9 +43,11 @@ class TTTOptimizer_Common {
     const sname = 'tttoptimizer';
 
     public function reset() {
+        
         unset( $this->srcs );
         unset( $this->_cache );
         unset( $this->_csing );
+        unset( $this->_sing );
 
         $this->do_optimization = false;
         if (  defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true ) {
@@ -53,7 +57,7 @@ class TTTOptimizer_Common {
 
     public function cache_control( $file ) {
 
-        if (  defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true ) {
+        if ( defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true ) {
             $this->do_optimization = true;
             return false;
         }
@@ -82,21 +86,34 @@ class TTTOptimizer_Common {
         if (count($this->srcs) <= 0 ) return false;
 
         if ( $this->_sing ) return $this->_sing;
+
+        if ( defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true ) {
+            echo '<!-- ttt-optimizer-sing :: ';
+            echo var_export(serialize($this->srcs));
+            echo '-->';
+        }
         $this->_sing = md5( serialize($this->srcs) );
-        $this->_cache = $this->get( $this->ext.'_'.$this->sing);
+        $this->_cache = $this->get( $this->ext.'_'.$this->sing );
 
         return $this->_sing;
     }
 
+    /**
+     * Get/Download content of the file (js or css) to concat in the general js or css
+     */
     public function download($src) {
+
+        if (isset($src['content'])) {
+            return $src['content'];
+        }
 
         $_base = get_site_url();
         $_base = preg_replace(array('/^https*\:\/\//','/^\/\//'),'',$_base);
         $_src = preg_replace(array('/^https*\:\/\//','/^\/\//'),'',$src['file']);
 
 
+        // Get content from local file
         if (strpos($_src, $_base) === 0) {
-            // Local file
             $_src = str_replace($_base, '', $_src);
             $_src = preg_replace('/\?.*/','',$_src);
             if (file_exists(ABSPATH.$_src)) {
@@ -104,8 +121,9 @@ class TTTOptimizer_Common {
                     return file_get_contents( ABSPATH.$_src);
                 }
                 else {
+                    var_dump($src['media']);
                     $_txt = "\n";
-                    $_txt = "/* TTT Optimizer - Media */";
+                    $_txt .= "/* TTT Optimizer - Media */";
                     $_txt .= "\n";
                     $_txt .= '@media '.$src['media'].' {'."\n";
                     $_txt .= file_get_contents( ABSPATH.$_src );
@@ -115,7 +133,7 @@ class TTTOptimizer_Common {
             }
         }
 
-        // Remote file
+        // Get content from remove file
         $ch = curl_init($src['file']);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
         curl_setopt($ch, CURLOPT_VERBOSE, 0);
@@ -142,7 +160,16 @@ class TTTOptimizer_Common {
     public function add_async_call() {
         if ( $this->ext == 'js' ) {
             $asyncjs = "
-            if ( jQuery ) { jQuery(document).ready(); jQuery(window).load(); }
+            // TTT-Optimizer - Async Event for jQuery
+            if ( jQuery ) {
+                jQuery(document).ready(function($) {
+                    $.each(tttopt_callbacks, function(i, func) {
+                        $(func);
+                    });
+                });
+                jQuery(window).load();
+                jQuery(document).ready();
+            }
             // TTT-Optimizer - Async Event for jQuery
             ";
             fwrite($this->temp, $asyncjs );
@@ -188,6 +215,25 @@ class TTTOptimizer_Common {
 
         fclose($this->temp);
     }
+
+    public function html_satinize($buffer) {
+
+        $search = array(
+            '/\>[^\S ]+/s',  // strip whitespaces after tags, except space
+            '/[^\S ]+\</s',  // strip whitespaces before tags, except space
+            '/(\s)+/s'       // shorten multiple whitespace sequences
+        );
+
+        $replace = array(
+            '>',
+            '<',
+            '\\1'
+        );
+
+        $buffer = preg_replace($search, $replace, $buffer);
+
+        return $buffer;
+    }
 }
 
 class TTTOptimizer_JS extends TTTOptimizer_Common {
@@ -210,7 +256,7 @@ class TTTOptimizer_JS extends TTTOptimizer_Common {
             return JSMin::minify( $string ).';';
     }
 
-    public function start( $buffer ) {
+    public function start( &$buffer ) {
         $s = preg_replace_callback('/<script\s+type=\'text\/javascript\'\s+src=\'([^\']+)\'><\/script>/i', array($this,'add'), $buffer );
         unset($buffer);
 
@@ -221,7 +267,7 @@ class TTTOptimizer_JS extends TTTOptimizer_Common {
             return $s."\n"."<script type='text/javascript' src='".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".js'></script>\n";
         }
         else {
-            return $s."\n";
+            return $s." ";
         }
     }
 
@@ -233,19 +279,12 @@ class TTTOptimizer_JS extends TTTOptimizer_Common {
     public function print_out() {
         $this->cache_control( ABSPATH.'/wp-content/ttt-optimizer/'.$this->sing().'.'.$this->ext );
         $this->shutdown();
-        echo "\n"."
-            <script type=\"text/javascript\">
-            (function() {
-                function async_load(){
-                    var s = document.createElement('script'); s.type = 'text/javascript'; s.async = true;
-                    s.src = '".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".js';
-                    var x = document.getElementsByTagName('script')[0]; x.parentNode.insertBefore(s, x);
-                }
-                if (window.attachEvent) window.attachEvent('onload', async_load);
-                else window.addEventListener('load', async_load, false);
-            })();
-            </script>
-        ";
+
+        echo "\n"."<script type='text/javascript' src='".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".js' async></script>\n";
+    }
+
+    public function download($src) {
+        return parent::download($src).';';
     }
 
 }
@@ -292,81 +331,116 @@ class TTTOptimizer_CSS extends TTTOptimizer_Common {
         return 'url("'.implode('/',$a).'/'.$s[1].'")';
     }
 
-    public function start( $buffer ) {
+    public function start( &$buffer ) {
         // <link rel='stylesheet' id='videojs-css'  href='http://callwey-dev.hting/wp-content/plugins/featured-video-plus/css/videojs.min.css?ver=1.8' type='text/css' media='' />
-        $s = preg_replace_callback(
+
+        $s1 = preg_replace_callback(
             array(
-                '/<link\s+rel=\'stylesheet\'\s+id=\'([^\']+)\'\s+href=\'([^\']+)\'\s+type=\'text\/css\'\s+media=\'([^\']*)\'\s+\/>/i',
+                '/<link(target, link)k\s+rel=\'stylesheet\'\s+id=\'([^\']+)\'\s+href=\'([^\']+)\'\s+type=\'text\/css\'\s+media=\'([^\']+)\'[^\>]*>/i',
+                '/<link\s+rel=\'stylesheet\'\s+id=\'([^\']+)\'\s+href=\'([^\']+)\'\s+type=\'text\/css\'\s+media=\'([^\']+)\'[^\>]*>/i',
                 '/<link\s+rel=\'stylesheet\'\s+id=\'([^\']+)\'\s+href=\'([^\']+)\'\s+type=\'text\/css\'[^\/]*\/>/i'
             ),
-            array( &$this,'add'), $buffer );
+            array( &$this,'add' ),
+            $buffer
+        );
         unset($buffer);
+
+
+        $s = preg_replace_callback(
+            array(
+                '/<style[^>]*>([^<]+)?<\/style>/im',
+            ),
+            array( $this,'add_inline' ),
+            $s1
+        );
 
         if ( count($this->srcs) <= 0 ) return $s;
 
         if ( $this->async == false ) {
             $this->cache_control( ABSPATH.'/wp-content/ttt-optimizer/'.$this->sing().'.'.$this->ext );
-            return $s."\n"."<link rel='stylesheet' id='ttt-optimizer-css' href='".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".css' type='text/css' media='' />\n";
+            if (defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true) {
+                $s .= '<!--';
+                $s .= "\n";
+                $s .= 'TTT Optimizer: DEBUG';
+                $s .= "\n";
+                // $s .= var_export($this->srcs,true);
+                $s .= "\n";
+                $s .= $this->html;
+                $s .= '-->';
+            }
+            return $s."\n"."<link rel='stylesheet' id='ttt-optimizer-css' href='".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".css' type='text/css' media='all' />\n";
         }
         else {
-            return $s."\n";
+            return $s." ";
+        }
+    }
+
+    public function add_inline($src) {
+        $this->srcs[] = array( 'content' => $src[1], 'media' => $src[3] );
+        if (defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true) {
+            $this->html .= var_export($src,true);
+            $this->html .= "\n";
         }
     }
 
     public function add( $src ) {
         $this->srcs[] = array( 'file' => $src[2], 'media' => $src[3] );
-        $this->html .= "<link rel='stylesheet' id='".$src[1]."' href='".$src[2]."' type='text/css' media='".$src[3]."' />"."\n";
+        if (defined('TTT_OPTIMIZER_DEBUG') && TTT_OPTIMIZER_DEBUG == true) {
+            // $this->html .= "<link rel='stylesheet' id='".$src[1]."' href='".$src[2]."' type='text/css' media='".$src[3]."' />"."\n";
+            // $this->html .= var_export($src,true);
+            // $this->html .= "\n";
+        }
     }
 
     public function print_out() {
+        if ( count($this->srcs) <= 0 ) return '';
+
         $this->cache_control( ABSPATH.'/wp-content/ttt-optimizer/'.$this->sing().'.'.$this->ext );
         $this->shutdown();
-        echo "\n"."<link rel='stylesheet' id='ttt-optimizer-css' href='".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".css' type='text/css' media='' />\n";
-        // echo "\n"."
-        //     <script type=\"text/javascript\">
-        //     (function() {
-        //         function async_load(){
-        //             var s = document.createElement('link'); s.rel = 'stylesheet'; s.id='ttt-optimizer-css'; s.type = 'text/css';
-        //             s.href = '".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".css';
-        //             var x = document.getElementsByTagName('script')[0]; x.parentNode.insertBefore(s, x);
-        //         }
-        //         if (window.attachEvent) window.attachEvent('onload', async_load);
-        //         else window.addEventListener('load', async_load, false);
-        //     })();
-        //     </script>
-        // ";
+        echo "\n"."<link rel='stylesheet' id='ttt-optimizer-css' href='".get_bloginfo('wpurl')."/wp-content/ttt-optimizer/".$this->sing().".css' type='text/css' media='all' />\n";
     }
 
 }
 
-class TTTOptimizer extends TTTOptimizer_Common {
+class TTTOptimizer {
 
-    public $async = false;
+    public $async = true;
+    public $_start_time = 0;
+    public $_end_time = 0;
 
-    public function __construct($async = false) {
-        $this->async = $async;
-        $this->JS = new TTTOptimizer_JS( $async );
-        $this->CSS = new TTTOptimizer_CSS( $async );
+    public function __construct($async = true) {
+
+        $this->async_js = ( defined('TTT_OPTIMIZER_ASYNC_JS') ? TTT_OPTIMIZER_ASYNC_JS : $async );
+        $this->async_css = ( defined('TTT_OPTIMIZER_ASYNC_CSS') ? TTT_OPTIMIZER_ASYNC_CSS : $async );
+
+        $this->JS = new TTTOptimizer_JS( $this->async_js );
+        $this->CSS = new TTTOptimizer_CSS( $this->async_css );
     }
     
     public function buffer_start() {
+        $this->_start_time = microtime(true);
         ob_start( array( $this,'start') );
     }
 
     public function buffer_end() {
         ob_end_flush();
+        $this->_end_time = microtime(true);
+
+        echo sprintf("\n<!-- TTT Optimizer time: %s -->\n", $this->_end_time-$this->_start_time);
     }
 
     public function start( $buffer ) {
 
         $buffer = $this->CSS->start( $buffer );
-        if ( $this->async == false ) {
+        if ( $this->async_css !== true ) {
             $this->CSS->shutdown();
+            $this->CSS->reset();
         }
 
         $buffer = $this->JS->start( $buffer );
-        if ( $this->async == false ) {
+        if ( $this->async_js == false ) {
             $this->JS->shutdown();
+            $this->JS->reset();
         }
 
         return $buffer;
@@ -376,6 +450,14 @@ class TTTOptimizer extends TTTOptimizer_Common {
         $this->CSS->print_out();
         $this->JS->print_out();
     }
+
+    public function jquery_async() {
+        ?>
+        <script type="text/javascript">
+            var tttopt_callbacks = []; function jQuery(func) { if (func) tttopt_callbacks.push(func); return {ready: function(func) { tttopt_callbacks.push(func); }}; }
+        </script>
+        <?php
+    }
 }
 
 
@@ -384,27 +466,26 @@ function ttt_optimizer_init() {
         return false;
     }
 
-    if (  defined('TTT_OPTIMIZER_ASYNC') && TTT_OPTIMIZER_ASYNC == true ) {
-        $TTTOptimizer = new TTTOptimizer( true );
-        add_action('wp_head', array( $TTTOptimizer, 'buffer_start') ,0);
-        add_action('wp_head', array( $TTTOptimizer, 'buffer_end') ,999);
-        add_action('wp_footer', array( $TTTOptimizer, 'buffer_start') ,0);
-        add_action('wp_footer', array( $TTTOptimizer, 'buffer_end') ,998);
-        add_action('wp_footer', array( $TTTOptimizer, 'global_end') ,999);
+
+    if (  defined('TTT_OPTIMIZER_ASYNC') && TTT_OPTIMIZER_ASYNC == false ) {
+        $TTTOptimizer1 = new TTTOptimizer(false);
+        add_action('wp_head', array( $TTTOptimizer1, 'buffer_start'), -1);
+        add_action('wp_footer', array( $TTTOptimizer1, 'buffer_end'), 9999);
     }
     else {
-        
-        $TTTOptimizer1 = new TTTOptimizer();
-        add_action('wp_head', array( $TTTOptimizer1, 'buffer_start'), 0);
-        add_action('wp_head', array( $TTTOptimizer1, 'buffer_end'), 999);
+        $TTTOptimizer = new TTTOptimizer();
+        add_action('wp_head', array( $TTTOptimizer, 'buffer_start') ,0);
+        add_action('wp_head', array( $TTTOptimizer, 'buffer_end') ,999);
+        add_action('wp_head', array( $TTTOptimizer, 'jquery_async') , 0);
+        add_action('wp_footer', array( $TTTOptimizer, 'buffer_start') ,0);
+        add_action('wp_footer', array( $TTTOptimizer, 'buffer_end') ,998);
 
-        $TTTOptimizer2 = new TTTOptimizer();
-        add_action('wp_footer', array( $TTTOptimizer2, 'buffer_start'), 0);
-        add_action('wp_footer', array( $TTTOptimizer2, 'buffer_end'), 999);
-
+        if ( defined('TTT_OPIMIZER_WPEND') && TTT_OPIMIZER_WPEND == true) {
+            add_action('ttt_optimizer_wpend', array( $TTTOptimizer, 'global_end') ,9999);
+        }
+        else {
+            add_action('wp_footer', array( $TTTOptimizer, 'global_end') ,9999);
+        }
     }
 }
 add_action('init','ttt_optimizer_init');
-
-
-?>
